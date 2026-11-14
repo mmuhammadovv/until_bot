@@ -43,8 +43,8 @@ HELP = (
     "или <code>/add 01.09.2027 Отпуск</code>\n\n"
     "/list — мои даты (там же можно удалить)\n"
     "/now — прислать отсчёт прямо сейчас\n"
-    "/time 08:30 — во сколько присылать сообщение\n"
-    "/tz Europe/Moscow или /tz +5 — часовой пояс\n"
+    "/time — во сколько присылать уведомление\n"
+    "/tz — часовой пояс\n"
     "/settings — текущие настройки\n"
     "/stop — удалить все мои данные"
 )
@@ -112,10 +112,10 @@ async def add_event(message: Message, text: str) -> None:
 
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
-    user = storage.ensure_user(message.chat.id, DEFAULT_TZ, DEFAULT_TIME)
+    storage.ensure_user(message.chat.id, DEFAULT_TZ, DEFAULT_TIME)
+    await message.answer(f"Привет! 👋\n\n{HELP}")
     await message.answer(
-        f"Привет! 👋\n\n{HELP}\n\n"
-        f"Сейчас сообщения приходят в <b>{user.notify_time}</b> ({html.escape(user.tz)})."
+        "Для начала выбери свой часовой пояс 🌍", reply_markup=tz_keyboard(onboarding=True)
     )
 
 
@@ -169,42 +169,130 @@ async def cmd_now(message: Message) -> None:
     await message.answer(report or "Дат пока нет. /help — как добавить.")
 
 
-@router.message(Command("time"))
-async def cmd_time(message: Message, command: CommandObject) -> None:
-    chat_id = message.chat.id
+TIMEZONES = [
+    ("🇺🇿 Ташкент", "Asia/Tashkent"),
+    ("🇷🇺 Москва", "Europe/Moscow"),
+    ("🇰🇿 Астана", "Asia/Almaty"),
+    ("🇰🇬 Бишкек", "Asia/Bishkek"),
+    ("🇹🇯 Душанбе", "Asia/Dushanbe"),
+    ("🇹🇲 Ашхабад", "Asia/Ashgabat"),
+    ("🇦🇿 Баку", "Asia/Baku"),
+    ("🇺🇦 Киев", "Europe/Kyiv"),
+    ("🇧🇾 Минск", "Europe/Minsk"),
+    ("🇹🇷 Стамбул", "Europe/Istanbul"),
+    ("🇩🇪 Берлин", "Europe/Berlin"),
+    ("🇬🇧 Лондон", "Europe/London"),
+    ("🇷🇺 Екатеринбург", "Asia/Yekaterinburg"),
+    ("🇷🇺 Новосибирск", "Asia/Novosibirsk"),
+    ("🇷🇺 Владивосток", "Asia/Vladivostok"),
+    ("🇺🇸 Нью-Йорк", "America/New_York"),
+]
+TIME_HINT = (
+    "Нажми на час или напиши точное время командой, например <code>/time 08:30</code>"
+)
+
+
+def tz_keyboard(onboarding: bool = False) -> InlineKeyboardMarkup:
+    prefix = "tzs" if onboarding else "tz"
+    buttons = [
+        InlineKeyboardButton(text=label, callback_data=f"{prefix}:{name}")
+        for label, name in TIMEZONES
+    ]
+    rows = [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def time_keyboard() -> InlineKeyboardMarkup:
+    buttons = [
+        InlineKeyboardButton(text=f"{h:02d}:00", callback_data=f"time:{h:02d}:00")
+        for h in range(24)
+    ]
+    rows = [buttons[i : i + 6] for i in range(0, 24, 6)]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def set_time(chat_id: int, t) -> str:
     user = storage.ensure_user(chat_id, DEFAULT_TZ, DEFAULT_TIME)
-    try:
-        t = parse_time(command.args or "")
-    except ValueError:
-        await message.answer("Укажи время в формате ЧЧ:ММ, например: <code>/time 08:30</code>")
-        return
     value = t.strftime("%H:%M")
     storage.set_user_field(chat_id, "notify_time", value)
     # Если новое время сегодня ещё не наступило — пришлём сообщение и сегодня.
-    now = local_now(user.tz)
-    if now.time() < t:
+    if local_now(user.tz).time() < t:
         storage.set_user_field(chat_id, "last_sent", None)
-    await message.answer(f"⏰ Теперь буду писать каждый день в <b>{value}</b>.")
+    return (
+        f"⏰ Готово! Каждый день в <b>{value}</b> буду присылать, сколько дней осталось.\n\n"
+        "Теперь добавь дату — просто напиши, например:\n<code>31.12.2026 Новый год</code>"
+    )
+
+
+def set_tz(chat_id: int, name: str) -> str:
+    storage.ensure_user(chat_id, DEFAULT_TZ, DEFAULT_TIME)
+    storage.set_user_field(chat_id, "tz", name)
+    now = local_now(name)
+    return f"🌍 Часовой пояс: <b>{html.escape(name)}</b>. Местное время сейчас {now:%H:%M}."
+
+
+@router.message(Command("time"))
+async def cmd_time(message: Message, command: CommandObject) -> None:
+    if not command.args:
+        await message.answer(
+            "Во сколько каждый день присылать уведомление? ⏰\n" + TIME_HINT,
+            reply_markup=time_keyboard(),
+        )
+        return
+    try:
+        t = parse_time(command.args)
+    except ValueError:
+        await message.answer("Укажи время в формате ЧЧ:ММ, например: <code>/time 08:30</code>")
+        return
+    await message.answer(set_time(message.chat.id, t))
+
+
+@router.callback_query(F.data.startswith("time:"))
+async def cb_time(query: CallbackQuery) -> None:
+    t = parse_time(query.data.split(":", 1)[1])  # type: ignore[union-attr]
+    text = set_time(query.from_user.id if not query.message else query.message.chat.id, t)
+    await query.answer()
+    if query.message:
+        await query.message.edit_text(text)  # type: ignore[union-attr]
 
 
 @router.message(Command("tz"))
 async def cmd_tz(message: Message, command: CommandObject) -> None:
-    chat_id = message.chat.id
-    storage.ensure_user(chat_id, DEFAULT_TZ, DEFAULT_TIME)
     arg = (command.args or "").strip()
+    if not arg:
+        await message.answer(
+            "Выбери часовой пояс 🌍\nЕсли твоего города нет — напиши, например, "
+            "<code>/tz Asia/Samarkand</code> или <code>/tz +5</code>",
+            reply_markup=tz_keyboard(),
+        )
+        return
     try:
         parse_tz(arg)
     except ValueError:
         await message.answer(
-            "Укажи часовой пояс, например:\n<code>/tz Europe/Moscow</code>\n"
-            "<code>/tz Asia/Tashkent</code>\n<code>/tz +3</code>"
+            "Не знаю такой часовой пояс. Примеры:\n<code>/tz Asia/Tashkent</code>\n"
+            "<code>/tz Europe/Moscow</code>\n<code>/tz +5</code>"
         )
         return
-    storage.set_user_field(chat_id, "tz", arg)
-    now = local_now(arg)
-    await message.answer(
-        f"🌍 Часовой пояс: <b>{html.escape(arg)}</b>. Местное время сейчас {now:%H:%M}."
-    )
+    await message.answer(set_tz(message.chat.id, arg))
+
+
+@router.callback_query(F.data.startswith("tz:") | F.data.startswith("tzs:"))
+async def cb_tz(query: CallbackQuery) -> None:
+    prefix, name = query.data.split(":", 1)  # type: ignore[union-attr]
+    if name not in {n for _, n in TIMEZONES}:
+        await query.answer()
+        return
+    chat_id = query.message.chat.id if query.message else query.from_user.id
+    text = set_tz(chat_id, name)
+    await query.answer()
+    if query.message:
+        await query.message.edit_text(text)  # type: ignore[union-attr]
+        if prefix == "tzs":  # первый запуск: сразу предлагаем выбрать время
+            await query.message.answer(  # type: ignore[union-attr]
+                "Во сколько каждый день присылать уведомление? ⏰\n" + TIME_HINT,
+                reply_markup=time_keyboard(),
+            )
 
 
 @router.message(Command("settings"))
@@ -284,7 +372,7 @@ async def main() -> None:
             BotCommand(command="list", description="Мои даты"),
             BotCommand(command="add", description="Добавить дату"),
             BotCommand(command="now", description="Отсчёт прямо сейчас"),
-            BotCommand(command="time", description="Время ежедневного сообщения"),
+            BotCommand(command="time", description="Во сколько присылать уведомление"),
             BotCommand(command="tz", description="Часовой пояс"),
             BotCommand(command="settings", description="Настройки"),
             BotCommand(command="help", description="Справка"),

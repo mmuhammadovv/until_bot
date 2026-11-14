@@ -71,3 +71,13 @@ def test_send_daily_once_per_day(tmp_path, monkeypatch):
     assert "<b>3</b> дня до «Отпуск»" in to_user1[0]
     assert "Старое" not in to_user1[0]
     assert [e.title for e in botmod.storage.events(1)] == ["Отпуск"]
+
+
+def test_set_time_and_tz(tmp_path):
+    botmod.storage = Storage(str(tmp_path / "db.sqlite3"))
+    botmod.set_tz(5, "Asia/Tashkent")
+    botmod.set_time(5, parse_time("07:15"))
+    u = botmod.storage.get_user(5)
+    assert (u.tz, u.notify_time) == ("Asia/Tashkent", "07:15")
+    kb = botmod.time_keyboard()
+    assert sum(len(r) for r in kb.inline_keyboard) == 24
