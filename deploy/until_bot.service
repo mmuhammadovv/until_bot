@@ -1,0 +1,16 @@
+# systemd-сервис для запуска без Docker.
+# Установка: sudo cp deploy/until_bot.service /etc/systemd/system/ && sudo systemctl enable --now until_bot
+[Unit]
+Description=until_bot Telegram countdown bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/opt/until_bot
+ExecStart=/opt/until_bot/.venv/bin/python -m until_bot
+Restart=always
+RestartSec=5
+User=untilbot
+
+[Install]
+WantedBy=multi-user.target

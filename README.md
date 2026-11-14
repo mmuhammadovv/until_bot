@@ -35,7 +35,45 @@
    ```
 
 Данные хранятся в SQLite-файле `until_bot.sqlite3` (путь меняется через `DB_PATH`).
-Чтобы бот работал постоянно, запустите его на сервере (systemd, Docker, screen и т.п.).
+
+## Работа онлайн 24/7 (для вас и друзей)
+
+Бот многопользовательский: каждый, кто напишет ему `/start`, получает свой список дат,
+своё время и часовой пояс. Нужно лишь, чтобы бот был постоянно запущен на сервере.
+Подойдёт любой VPS (Linux, 512 МБ RAM хватит) — открывать порты и иметь домен не нужно,
+бот сам опрашивает Telegram.
+
+### Вариант 1 — Docker (рекомендуется)
+
+```bash
+git clone <url-репозитория> until_bot && cd until_bot
+cp .env.example .env   # впишите BOT_TOKEN
+docker compose up -d --build
+docker compose logs -f   # посмотреть логи
+```
+
+База лежит в папке `./data` и переживает перезапуски и обновления.
+Обновить бота: `git pull && docker compose up -d --build`.
+
+### Вариант 2 — systemd без Docker
+
+```bash
+sudo useradd -r -m -d /opt/until_bot untilbot
+sudo -u untilbot git clone <url-репозитория> /opt/until_bot
+cd /opt/until_bot
+sudo -u untilbot python3 -m venv .venv
+sudo -u untilbot .venv/bin/pip install -r requirements.txt
+sudo -u untilbot cp .env.example .env   # впишите BOT_TOKEN
+sudo cp deploy/until_bot.service /etc/systemd/system/
+sudo systemctl enable --now until_bot
+journalctl -u until_bot -f
+```
+
+### Важно
+
+- Запускайте **только одну копию** бота с одним токеном — иначе Telegram вернёт ошибку `Conflict`.
+- Чтобы друзья нашли бота, дайте им ссылку `https://t.me/<имя_бота>`.
+- Описание и аватарку можно задать у @BotFather (`/setdescription`, `/setuserpic`).
 
 ## Тесты
 

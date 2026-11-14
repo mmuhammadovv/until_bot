@@ -10,7 +10,8 @@ from datetime import date
 from aiogram import Bot, Dispatcher, F, Router
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.enums import ChatType
+from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
 from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     BotCommand,
@@ -31,6 +32,7 @@ DEFAULT_TIME = os.getenv("DEFAULT_TIME", "09:00")
 DB_PATH = os.getenv("DB_PATH", "until_bot.sqlite3")
 CHECK_INTERVAL = 30  # секунд между проверками расписания
 MAX_EVENTS = 50
+SEND_DELAY = 0.05  # пауза между рассылками разным пользователям
 MAX_TITLE = 100
 
 HELP = (
@@ -220,9 +222,21 @@ async def cmd_stop(message: Message) -> None:
     await message.answer("Все твои данные удалены. Напиши /start, чтобы начать заново.")
 
 
-@router.message(F.text & ~F.text.startswith("/"))
+# Обычный текст считаем добавлением даты только в личке, чтобы не реагировать на переписку в группах.
+@router.message(F.chat.type == ChatType.PRIVATE, F.text, ~F.text.startswith("/"))
 async def plain_text(message: Message) -> None:
     await add_event(message, message.text or "")
+
+
+async def send_with_retry(bot: Bot, chat_id: int, text: str) -> None:
+    for _ in range(3):
+        try:
+            await bot.send_message(chat_id, text)
+            return
+        except TelegramRetryAfter as e:
+            log.warning("Лимит Telegram, жду %s с", e.retry_after)
+            await asyncio.sleep(e.retry_after)
+    await bot.send_message(chat_id, text)
 
 
 async def send_daily(bot: Bot) -> None:
@@ -236,7 +250,8 @@ async def send_daily(bot: Bot) -> None:
             storage.delete_past(user.chat_id, today)  # прошедшие даты больше не нужны
             report = build_report(user.chat_id, today)
             if report:
-                await bot.send_message(user.chat_id, report)
+                await send_with_retry(bot, user.chat_id, report)
+                await asyncio.sleep(SEND_DELAY)  # не превышаем лимиты Telegram (~30 сообщений/с)
             storage.set_user_field(user.chat_id, "last_sent", today.isoformat())
         except TelegramForbiddenError:
             log.info("Пользователь %s заблокировал бота — удаляю данные", user.chat_id)

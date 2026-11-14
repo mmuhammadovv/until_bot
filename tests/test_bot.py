@@ -54,7 +54,8 @@ class FakeBot:
         self.sent.append((chat_id, text))
 
 
-def test_send_daily_once_per_day(tmp_path):
+def test_send_daily_once_per_day(tmp_path, monkeypatch):
+    monkeypatch.setattr(botmod, "SEND_DELAY", 0)
     botmod.storage = Storage(str(tmp_path / "db.sqlite3"))
     today = local_now("UTC").date()
     botmod.storage.ensure_user(1, "UTC", "00:00")
