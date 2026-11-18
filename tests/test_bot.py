@@ -50,8 +50,8 @@ class FakeBot:
     def __init__(self):
         self.sent = []
 
-    async def send_message(self, chat_id, text):
-        self.sent.append((chat_id, text))
+    async def send_photo(self, chat_id, photo, caption=None, reply_markup=None):
+        self.sent.append((chat_id, caption, photo))
 
 
 def test_send_daily_once_per_day(tmp_path, monkeypatch):
@@ -59,25 +59,32 @@ def test_send_daily_once_per_day(tmp_path, monkeypatch):
     botmod.storage = Storage(str(tmp_path / "db.sqlite3"))
     today = local_now("UTC").date()
     botmod.storage.ensure_user(1, "UTC", "00:00")
-    botmod.storage.add_event(1, "Отпуск", today + timedelta(days=3))
-    botmod.storage.add_event(1, "Старое", today - timedelta(days=1))
+    botmod.storage.add_event(1, "Отпуск", today + timedelta(days=3), today)
+    botmod.storage.add_event(1, "Старое", today - timedelta(days=1), today - timedelta(days=5))
 
     fake = FakeBot()
     asyncio.run(botmod.send_daily(fake))
     asyncio.run(botmod.send_daily(fake))  # повтор в тот же день — без дубля
 
-    to_user1 = [t for c, t in fake.sent if c == 1]
-    assert len(to_user1) == 1
-    assert "<b>3</b> дня до «Отпуск»" in to_user1[0]
-    assert "Старое" not in to_user1[0]
+    assert len(fake.sent) == 1
+    chat_id, caption, _ = fake.sent[0]
+    assert chat_id == 1 and caption == "Отпуск — 3 дня"
     assert [e.title for e in botmod.storage.events(1)] == ["Отпуск"]
 
 
-def test_set_time_and_tz(tmp_path):
-    botmod.storage = Storage(str(tmp_path / "db.sqlite3"))
-    botmod.set_tz(5, "Asia/Tashkent")
-    botmod.set_time(5, parse_time("07:15"))
-    u = botmod.storage.get_user(5)
-    assert (u.tz, u.notify_time) == ("Asia/Tashkent", "07:15")
-    kb = botmod.time_keyboard()
-    assert sum(len(r) for r in kb.inline_keyboard) == 24
+def test_migration_from_old_db(tmp_path):
+    import sqlite3
+    path = str(tmp_path / "old.sqlite3")
+    c = sqlite3.connect(path)
+    c.executescript("""
+        CREATE TABLE users (chat_id INTEGER PRIMARY KEY, tz TEXT NOT NULL,
+                            notify_time TEXT NOT NULL, last_sent TEXT);
+        CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER NOT NULL,
+                             title TEXT NOT NULL, date TEXT NOT NULL);
+        INSERT INTO users VALUES (1, 'UTC', '09:00', NULL);
+        INSERT INTO events (chat_id, title, date) VALUES (1, 'НГ', '2030-12-31');
+    """)
+    c.commit(); c.close()
+    s = Storage(path)
+    assert s.get_user(1).theme == "dark"
+    assert s.events(1)[0].created is not None

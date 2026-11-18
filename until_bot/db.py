@@ -12,6 +12,7 @@ class User:
     tz: str
     notify_time: str
     last_sent: str | None
+    theme: str = "dark"
 
 
 @dataclass
@@ -20,6 +21,7 @@ class Event:
     chat_id: int
     title: str
     date: date
+    created: date
 
 
 class Storage:
@@ -38,12 +40,25 @@ class Storage:
                 id      INTEGER PRIMARY KEY AUTOINCREMENT,
                 chat_id INTEGER NOT NULL REFERENCES users(chat_id),
                 title   TEXT NOT NULL,
-                date    TEXT NOT NULL
+                date    TEXT NOT NULL,
+                created TEXT
             );
             CREATE INDEX IF NOT EXISTS events_chat ON events(chat_id);
             """
         )
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self) -> None:
+        """Добавляет новые колонки в базу, созданную старой версией бота."""
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(users)")}
+        if "theme" not in cols:
+            self.conn.execute("ALTER TABLE users ADD COLUMN theme TEXT NOT NULL DEFAULT 'dark'")
+        cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(events)")}
+        if "created" not in cols:
+            # Для старых дат точка отсчёта прогресса — день обновления бота.
+            self.conn.execute("ALTER TABLE events ADD COLUMN created TEXT")
+            self.conn.execute("UPDATE events SET created = date('now') WHERE created IS NULL")
 
     # --- пользователи ---
     def ensure_user(self, chat_id: int, tz: str, notify_time: str) -> User:
@@ -62,7 +77,7 @@ class Storage:
         return [User(**r) for r in self.conn.execute("SELECT * FROM users")]
 
     def set_user_field(self, chat_id: int, field: str, value: str | None) -> None:
-        if field not in {"tz", "notify_time", "last_sent"}:
+        if field not in {"tz", "notify_time", "last_sent", "theme"}:
             raise ValueError(field)
         self.conn.execute(f"UPDATE users SET {field} = ? WHERE chat_id = ?", (value, chat_id))
         self.conn.commit()
@@ -73,10 +88,10 @@ class Storage:
         self.conn.commit()
 
     # --- события ---
-    def add_event(self, chat_id: int, title: str, when: date) -> int:
+    def add_event(self, chat_id: int, title: str, when: date, created: date) -> int:
         cur = self.conn.execute(
-            "INSERT INTO events (chat_id, title, date) VALUES (?, ?, ?)",
-            (chat_id, title, when.isoformat()),
+            "INSERT INTO events (chat_id, title, date, created) VALUES (?, ?, ?, ?)",
+            (chat_id, title, when.isoformat(), created.isoformat()),
         )
         self.conn.commit()
         return cur.lastrowid  # type: ignore[return-value]
@@ -85,9 +100,32 @@ class Storage:
         rows = self.conn.execute(
             "SELECT * FROM events WHERE chat_id = ? ORDER BY date, id", (chat_id,)
         )
-        return [
-            Event(r["id"], r["chat_id"], r["title"], date.fromisoformat(r["date"])) for r in rows
-        ]
+        return [self._event(r) for r in rows]
+
+    def get_event(self, chat_id: int, event_id: int) -> Event | None:
+        row = self.conn.execute(
+            "SELECT * FROM events WHERE chat_id = ? AND id = ?", (chat_id, event_id)
+        ).fetchone()
+        return self._event(row) if row else None
+
+    @staticmethod
+    def _event(r: sqlite3.Row) -> Event:
+        target = date.fromisoformat(r["date"])
+        created = date.fromisoformat(r["created"]) if r["created"] else target
+        return Event(r["id"], r["chat_id"], r["title"], target, created)
+
+    def update_event(self, chat_id: int, event_id: int, *, title: str | None = None,
+                     when: date | None = None, created: date | None = None) -> None:
+        if title is not None:
+            self.conn.execute("UPDATE events SET title = ? WHERE chat_id = ? AND id = ?",
+                              (title, chat_id, event_id))
+        if when is not None:
+            self.conn.execute("UPDATE events SET date = ? WHERE chat_id = ? AND id = ?",
+                              (when.isoformat(), chat_id, event_id))
+        if created is not None:
+            self.conn.execute("UPDATE events SET created = ? WHERE chat_id = ? AND id = ?",
+                              (created.isoformat(), chat_id, event_id))
+        self.conn.commit()
 
     def delete_event(self, chat_id: int, event_id: int) -> bool:
         cur = self.conn.execute(
