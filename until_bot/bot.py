@@ -47,6 +47,9 @@ storage: Storage  # инициализируется в main()
 
 # chat_id → id сообщения-«экрана», который бот редактирует вместо отправки новых (чистый чат).
 screens: dict[int, int] = {}
+# Карточки с отсчётом не удаляются, когда пользователь уходит в другое меню: у них только
+# убираются кнопки, а подпись возвращается к обычной. (chat_id, message_id) → эта подпись.
+cards: dict[tuple[int, int], str] = {}
 
 
 # ---------------------------------------------------------------- тексты и клавиатуры
@@ -79,6 +82,13 @@ TIMEZONES = [
     ("Нью-Йорк", "America/New_York"),
 ]
 TZ_LABELS = {name: label for label, name in TIMEZONES}
+TZ_FLAGS = {
+    "Asia/Tashkent": "🇺🇿", "Europe/Moscow": "🇷🇺", "Asia/Almaty": "🇰🇿", "Asia/Bishkek": "🇰🇬",
+    "Asia/Dushanbe": "🇹🇯", "Asia/Ashgabat": "🇹🇲", "Asia/Baku": "🇦🇿", "Europe/Kyiv": "🇺🇦",
+    "Europe/Minsk": "🇧🇾", "Europe/Istanbul": "🇹🇷", "Europe/Berlin": "🇩🇪", "Europe/London": "🇬🇧",
+    "Asia/Yekaterinburg": "🇷🇺", "Asia/Novosibirsk": "🇷🇺", "Asia/Vladivostok": "🇷🇺",
+    "America/New_York": "🇺🇸",
+}
 THEME_LABELS = {"dark": "Тёмная", "light": "Светлая"}
 
 DESCRIPTION = (
@@ -127,6 +137,15 @@ async def drop(message: Message) -> None:
 
 async def _delete_screen(bot: Bot, chat_id: int) -> None:
     old = screens.pop(chat_id, None)
+    if old and (chat_id, old) in cards:
+        # Карточку оставляем в чате, убираем только кнопки.
+        caption = cards.pop((chat_id, old))
+        try:
+            await bot.edit_message_caption(chat_id=chat_id, message_id=old, caption=caption,
+                                           reply_markup=None)
+        except TelegramBadRequest:
+            pass
+        return
     if old:
         try:
             await bot.delete_message(chat_id, old)
@@ -154,20 +173,23 @@ async def show_text(bot: Bot, chat_id: int, text: str, markup: InlineKeyboardMar
 
 
 async def show_photo(bot: Bot, chat_id: int, png: bytes, caption: str,
-                     markup: InlineKeyboardMarkup | None, edit: Message | None = None) -> None:
-    """То же для экрана с картинкой."""
+                     markup: InlineKeyboardMarkup | None, edit: Message | None = None,
+                     keep: str | None = None) -> None:
+    """Экран-карточка. keep — подпись, которая останется у карточки, когда пользователь уйдёт дальше."""
     photo = BufferedInputFile(png, "card.png")
     if _is_screen(edit) and edit.photo:  # type: ignore[union-attr]
         try:
             await edit.edit_media(  # type: ignore[union-attr]
                 InputMediaPhoto(media=photo, caption=caption), reply_markup=markup
             )
+            cards[(chat_id, edit.message_id)] = keep or caption  # type: ignore[union-attr]
             return
         except TelegramBadRequest:
             pass
     await _delete_screen(bot, chat_id)
     msg = await bot.send_photo(chat_id, photo, caption=caption, reply_markup=markup)
     screens[chat_id] = msg.message_id
+    cards[(chat_id, msg.message_id)] = keep or caption
 
 
 async def set_caption(bot: Bot, chat_id: int, caption: str, markup: InlineKeyboardMarkup | None,
@@ -243,7 +265,8 @@ async def open_card(bot: Bot, chat_id: int, e: Event, edit: Message | None = Non
                     caption: str | None = None) -> None:
     today = user_today(chat_id)
     png = render_card(e.title, e.created, e.date, today, theme_of(chat_id))
-    await show_photo(bot, chat_id, png, caption or card_caption(e, today), card_kb(e), edit)
+    clean = card_caption(e, today)
+    await show_photo(bot, chat_id, png, caption or clean, card_kb(e), edit, keep=clean)
 
 
 def settings_view(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -265,7 +288,8 @@ def settings_view(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
 
 def tz_kb(onboarding: bool) -> InlineKeyboardMarkup:
     suffix = ":o" if onboarding else ""
-    buttons = [btn(label, f"tz:{name}{suffix}") for label, name in TIMEZONES]
+    buttons = [btn(f"{TZ_FLAGS.get(name, '')} {label}".strip(), f"tz:{name}{suffix}")
+               for label, name in TIMEZONES]
     rows = [buttons[i: i + 2] for i in range(0, len(buttons), 2)]
     rows.append([btn("Другой часовой пояс", f"tzc{suffix}")])
     if not onboarding:
@@ -446,9 +470,18 @@ async def cb_delete_ask(query: CallbackQuery, bot: Bot) -> None:
 @router.callback_query(F.data.startswith("del:"))
 async def cb_delete(query: CallbackQuery, bot: Bot) -> None:
     e = _event_from(query)
+    chat_id = query.from_user.id
     if e is not None:
-        storage.delete_event(query.from_user.id, e.id)
+        storage.delete_event(chat_id, e.id)
     await query.answer("Удалено")
+    # Карточку удалённой даты убираем из чата насовсем.
+    if _is_screen(query.message):
+        mid = screens.pop(chat_id)
+        cards.pop((chat_id, mid), None)
+        try:
+            await bot.delete_message(chat_id, mid)
+        except TelegramBadRequest:
+            pass
     await open_list(bot, query.from_user.id, query.message)  # type: ignore[arg-type]
 
 
@@ -513,6 +546,7 @@ async def edit_value(message: Message, state: FSMContext, bot: Bot) -> None:
                                 caption="Сохранено\n\n" + card_caption(e, today)),  # type: ignore[arg-type]
                 chat_id=chat_id, message_id=mid, reply_markup=card_kb(e),  # type: ignore[arg-type]
             )
+            cards[(chat_id, mid)] = card_caption(e, today)  # type: ignore[arg-type]
             return
         except TelegramBadRequest:
             pass

@@ -68,6 +68,7 @@ class FakeSession(BaseSession):
 def env(tmp_path):
     botmod.storage = Storage(str(tmp_path / "db.sqlite3"))
     botmod.screens.clear()
+    botmod.cards.clear()
     session = FakeSession()
     bot = Bot("123:abc", session=session)
     dp = Dispatcher()
@@ -100,7 +101,9 @@ def test_full_flow(env):
 
     async def scenario():
         await text("/start")
-        assert "Шаг 1 из 2" in session.last(SendMessage).text
+        first = session.last(SendMessage)
+        assert "Шаг 1 из 2" in first.text
+        assert first.reply_markup.inline_keyboard[0][0].text == "🇺🇿 Ташкент"
         await press("tz:Asia/Tashkent:o")
         assert "Шаг 2 из 2" in session.last(EditMessageText).text
         await press("time:08.00:o")
@@ -117,8 +120,15 @@ def test_full_flow(env):
         [e] = botmod.storage.events(CHAT)
         assert e.title == "Новый год" and e.date == dt.date(2099, 12, 31)
 
-        # Список → карточка → изменение названия
+        # Карточка не удаляется при переходе в меню — только убираются кнопки
+        card_id = botmod.screens[CHAT]
         await text(botmod.BTN_LIST)
+        assert not any(isinstance(c, DeleteMessage) and c.message_id == card_id for c in session.calls)
+        strip = session.last(EditMessageCaption)
+        assert strip.message_id == card_id and strip.reply_markup is None
+        assert "Добавлено" not in strip.caption
+
+        # Список → карточка → изменение названия
         assert "Мои даты" in session.last(SendMessage).text
         await press(f"ev:{e.id}")
         await press(f"edit:{e.id}", photo=True)
@@ -141,8 +151,10 @@ def test_full_flow(env):
         assert len(botmod.storage.events(CHAT)) == 2
         await press(f"delask:{e.id}", photo=True)
         assert "Удалить" in session.last(EditMessageCaption).caption
+        deleted_card = botmod.screens[CHAT]
         await press(f"del:{e.id}", photo=True)
         assert [x.title for x in botmod.storage.events(CHAT)] == ["Век"]
+        assert session.last(DeleteMessage).message_id == deleted_card
 
         # Ошибка ввода даты при изменении — подсказка появляется на карточке
         [v] = botmod.storage.events(CHAT)
